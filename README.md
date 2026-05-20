@@ -2,28 +2,27 @@
 
 A fun, interactive Hedera trivia game agent built on the [Hedera Agent Kit](https://portal.hedera.com/agent-lab). Test your Hedera knowledge, put real HBAR on the line, and win double your money if you get it right.
 
-## What Is This?
+## What It Does
 
-Hash Gordon is an AI-powered game-show host that runs a live trivia game in your terminal. Every round involves real HBAR transactions on the Hedera testnet (or mainnet). The agent handles everything — entry fees, payouts, balance checks — using the Hedera Agent Kit's LangChain integration.
+Hash Gordon is an AI-powered agent that runs a live trivia game in your terminal. Every round involves a real HBAR transactions on the Hedera testnet (or mainnet). The agent handles everything i.e entry fees, payouts and balance checks using the Hedera Agent Kit's LangChain integration.
 
 ### How a Round Works
 
-1. Type `play` — Hash Gordon asks if you're ready
-2. Confirm — the agent executes a real **entry fee transfer** (1 HBAR from your wallet to the prize pool) on-chain
-3. The AI generates a fresh **Hedera trivia question** — covering consensus, HTS, HCS, governance, fees, and more
-4. Answer correctly → the agent executes a real **payout transfer** (2 HBAR from the prize pool back to your wallet)
-5. Answer incorrectly → the entry fee stays in the prize pool, and Hash Gordon explains the correct answer
+1. Type `play` and Hash Gordon asks if you're ready
+2. Confirm and the agent executes a real **entry fee transfer** (1 HBAR from your wallet to the prize pool) on-chain
+3. The AI generates a fresh **Hedera trivia question**  covering consensus, HTS, HCS, governance, fees, and more basing on Hedera
+4. Answer correctly and the agent executes a real **payout transfer** (2 HBAR from the prize pool back to your wallet)
+5. Answer incorrectly and the entry fee stays in the prize pool, and Hash Gordon explains the correct answer
 
 Every transaction produces a real Hedera Transaction ID you can verify on [HashScan](https://hashscan.io).
 
 ---
 
-## Why It Stands Out
 
-- **Real on-chain transactions** — not simulated. Every entry fee and payout is a live Hedera transfer signed and submitted to the network
-- **Agent handles ALL transactions** — the Hedera Agent Kit's `TRANSFER_HBAR_TOOL` is used for both entry fees and payouts, with the client operator switching between accounts as needed
-- **AI-generated questions** — infinite variety, always fresh, always Hedera-focused. No static question bank
-- **Conversational agent** — talk to Hash Gordon naturally. Ask for hints, check your balance, ask about Hedera concepts, or just chat
+- **Real on-chain transactions**: Every entry fee and payout is a live Hedera transfer signed and submitted to the network
+- **Agent handles ALL transactions**: The Hedera Agent Kit's `TRANSFER_HBAR_TOOL` is used for both entry fees and payouts
+- **AI-generated questions**: Infinite variety, always fresh, always Hedera focused
+- **Conversational agent**: Talk to Hash Gordon naturally. Ask for hints, check your balance, ask about Hedera concepts, or just chat casually
 - **Built on official Hedera Agent Kit** — uses `coreAccountPlugin`, `coreAccountQueryPlugin`, `TRANSFER_HBAR_TOOL`, and `GET_HBAR_BALANCE_QUERY_TOOL`
 
 ---
@@ -93,7 +92,6 @@ PAYOUT_MULTIPLIER=2
 
 1. Go to [portal.hedera.com](https://portal.hedera.com)
 2. Create two testnet accounts
-3. Use the testnet faucet to fund both accounts
 4. Copy the **DER Encoded Private Key** for each account (found under "More Details")
 5. Fund the prize pool with at least 50 HBAR (covers ~25 winning rounds at 2x payout)
 
@@ -128,13 +126,13 @@ Type anything to chat | "play" to start | "score" | "history" | "exit"
 
 | Input | What happens |
 |---|---|
-| `play` | Start a new round — pays 1 HBAR entry fee on-chain |
+| `play` | Start a new round |
 | `A` / `B` / `C` / `D` | Answer the current question |
 | `hint` | Get a clue for the current question |
 | `score` or `stats` | See your session win/loss record and net HBAR |
 | `history` | See all round receipts with transaction IDs |
 | `exit` or `quit` | End the session with a final score summary |
-| Anything else | Chat with Hash Gordon — ask about Hedera, check your balance, etc. |
+| Anything else | Chat with Hash Gordon, ask about Hedera, check your balance, etc. |
 
 ### Example Session
 
@@ -185,11 +183,9 @@ systemPrompt.js   # Hash Gordon persona system prompt builder
 
 The agent uses the Hedera Agent Kit's `TRANSFER_HBAR_TOOL` for all on-chain actions:
 
-- **Entry fee**: Client operator is set to the player account → agent calls `TRANSFER_HBAR_TOOL` to send HBAR to the prize pool
-- **Payout**: Client operator is switched to the prize pool account → agent calls `TRANSFER_HBAR_TOOL` to send HBAR back to the player → operator is restored
+- **Entry fee**: Client operator is set to the player account and the agent calls `TRANSFER_HBAR_TOOL` to send HBAR to the prize pool
+- **Payout**: Client operator is switched to the prize pool account and the agent calls `TRANSFER_HBAR_TOOL` to send HBAR back to the player. Operator is restored after this
 - **Balance checks**: Agent calls `GET_HBAR_BALANCE_QUERY_TOOL` for the player account
-
-This approach keeps all transactions going through the official Hedera Agent Kit tooling while correctly handling the two-account signing requirement.
 
 ---
 
@@ -210,12 +206,6 @@ The game currently uses Groq (free). To switch to OpenAI GPT-4o mini:
    ```
 3. In `config.js`, add `openAiApiKey: process.env.OPENAI_API_KEY` and update the required vars list
 4. Add `OPENAI_API_KEY=sk-...` to your `.env`
-
----
-
-## Built For
-
-[Hedera Agent Kit Hackathon](https://hedera.com) — demonstrating a real commercial interaction using the Hedera Agent Kit with live on-chain HBAR payments, AI-generated content, and a conversational agent interface.
 
 ---
 

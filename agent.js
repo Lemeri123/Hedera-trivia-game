@@ -9,7 +9,7 @@ import {
   coreAccountQueryPlugin,
 } from '@hashgraph/hedera-agent-kit/plugins';
 import { HederaLangchainToolkit, ResponseParserService } from '@hashgraph/hedera-agent-kit-langchain';
-import { Client, PrivateKey, TransferTransaction, Hbar } from '@hiero-ledger/sdk';
+import { Client, PrivateKey } from '@hiero-ledger/sdk';
 import prompts from 'prompts';
 import { createAgent } from 'langchain';
 import { MemorySaver } from '@langchain/langgraph';
@@ -34,7 +34,6 @@ async function bootstrap() {
     return Client.forTestnet();
   }
 
-  // Parse private key — handle both ED25519 and ECDSA DER formats
   function parsePrivateKey(keyStr) {
     try { return PrivateKey.fromStringDer(keyStr); } catch (_) {}
     try { return PrivateKey.fromStringECDSA(keyStr); } catch (_) {}
@@ -43,30 +42,33 @@ async function bootstrap() {
   }
 
   const operatorKey = parsePrivateKey(config.operatorPrivateKey);
-  const client = getHederaClient().setOperator(config.operatorAccountId, operatorKey);
-
   let prizePoolKey = null;
   if (config.prizePoolPrivateKey) {
-    try {
-      prizePoolKey = parsePrivateKey(config.prizePoolPrivateKey);
-    } catch {
-      console.warn('Warning: PRIZE_POOL_PRIVATE_KEY could not be parsed. Payouts will be skipped.');
+    try { prizePoolKey = parsePrivateKey(config.prizePoolPrivateKey); } catch (_) {
+      console.warn('Warning: PRIZE_POOL_PRIVATE_KEY could not be parsed.');
     }
   }
+
+  const client = getHederaClient().setOperator(config.operatorAccountId, operatorKey);
 
   const { TRANSFER_HBAR_TOOL } = coreAccountPluginToolNames;
   const { GET_HBAR_BALANCE_QUERY_TOOL } = coreAccountQueryPluginToolNames;
 
-  const hederaAgentToolkit = new HederaLangchainToolkit({
-    client,
-    configuration: {
-      plugins: [coreAccountPlugin, coreAccountQueryPlugin],
-      tools: [TRANSFER_HBAR_TOOL, GET_HBAR_BALANCE_QUERY_TOOL],
-      context: { mode: AgentMode.AUTONOMOUS, accountId: config.operatorAccountId },
-    },
-  });
+  // Build toolkit when switching operators for payout
+  function buildToolkit(accountId) {
+    return new HederaLangchainToolkit({
+      client,
+      configuration: {
+        plugins: [coreAccountPlugin, coreAccountQueryPlugin],
+        tools: [TRANSFER_HBAR_TOOL, GET_HBAR_BALANCE_QUERY_TOOL],
+        context: { mode: AgentMode.AUTONOMOUS, accountId },
+      },
+    });
+  }
 
-  const responseParserService = new ResponseParserService(hederaAgentToolkit.getTools());
+  let toolkit = buildToolkit(config.operatorAccountId);
+  let responseParserService = new ResponseParserService(toolkit.getTools());
+
   const memory = new MemorySaver();
   const agentConfig = { configurable: { thread_id: 'hash-gordon-trivia' } };
   const llm = new ChatGroq({ model: 'llama-3.1-8b-instant', apiKey: config.groqApiKey });
@@ -78,32 +80,51 @@ When told to check balance, call GET_HBAR_BALANCE.
 For ALL other questions, answer from your own knowledge — NEVER call any other tool.
 Keep responses short, punny, and energetic.`;
 
-  const agent = createAgent({
+  let agent = createAgent({
     model: llm,
-    tools: hederaAgentToolkit.getTools(),
+    tools: toolkit.getTools(),
     checkpointer: memory,
     stateModifier: systemPrompt,
   });
 
+  // Switch the Hedera client operator and rebuild the agent with new toolkit
+  function switchOperator(accountId, key) {
+    client.setOperator(accountId, key);
+    toolkit = buildToolkit(accountId);
+    responseParserService = new ResponseParserService(toolkit.getTools());
+    agent = createAgent({
+      model: llm,
+      tools: toolkit.getTools(),
+      checkpointer: memory,
+      stateModifier: systemPrompt,
+    });
+  }
+
   const gameState = createGameState();
   let lastCompletedRound = null;
 
-  // --- Direct SDK transfer (bypasses agent, uses prize pool key) ---
-  async function directTransfer(fromAccountId, fromKey, toAccountId, hbarAmount) {
-    client.setOperator(fromAccountId, fromKey);
-    try {
-      const tx = await new TransferTransaction()
-        .addHbarTransfer(fromAccountId, new Hbar(-hbarAmount))
-        .addHbarTransfer(toAccountId, new Hbar(hbarAmount))
-        .execute(client);
-      await tx.getReceipt(client);
-      return tx.transactionId.toString();
-    } finally {
-      client.setOperator(config.operatorAccountId, operatorKey);
+  // Extract transaction ID from all possible locations in the response
+  function extractTxId(toolCall, result) {
+    if (!toolCall) return null;
+    const candidates = [
+      toolCall.transactionId,
+      toolCall.result?.transactionId,
+      toolCall.raw?.transactionId,
+      toolCall.parsedData?.raw?.transactionId,
+      toolCall.parsedData?.transactionId,
+    ];
+    for (const c of candidates) {
+      if (c && typeof c === 'string') return c;
     }
+    // Try extracting from tool message content
+    for (const msg of (result?.messages ?? [])) {
+      const content = typeof msg.content === 'string' ? msg.content : '';
+      const match = content.match(/\b(\d+\.\d+\.\d+@\d+\.\d+)\b/);
+      if (match) return match[1];
+    }
+    return null;
   }
 
-  // --- Agent invoke helper (for entry fee + chat only) ---
   async function invokeAgent(userMessage) {
     const result = await agent.invoke(
       { messages: [{ role: 'user', content: userMessage }] },
@@ -111,7 +132,7 @@ Keep responses short, punny, and energetic.`;
     );
     const parsed = responseParserService.parseNewToolMessages(result);
     const toolCall = parsed[0] ?? null;
-    const txId = toolCall?.transactionId ?? toolCall?.result?.transactionId ?? toolCall?.raw?.transactionId ?? null;
+    const txId = extractTxId(toolCall, result);
     let text = '';
     for (let i = result.messages.length - 1; i >= 0; i--) {
       const msg = result.messages[i];
@@ -124,7 +145,7 @@ Keep responses short, punny, and energetic.`;
     return { text, toolCall, txId };
   }
 
-  // --- Question generation ---
+  // Question generation
   async function generateQuestion() {
     const topics = [
       'Hedera Hashgraph consensus algorithm',
@@ -139,90 +160,14 @@ Keep responses short, punny, and energetic.`;
       'Hedera predictable fee structure',
       'Hedera account ID format (shard.realm.num)',
       'Hedera transaction ID format',
-      'Hedera EVM compatibility',
-      'Hedera mirror nodes',
-      'Hedera mainnet vs testnet',
-      'Hedera SDK for JavaScript',
-      'Hedera network finality guarantee',
-      'Hedera proxy staking',
-      'Hedera Improvement Proposal (HIP) process',
-      'Hedera carbon-negative sustainability claims',
-      'Hedera serialization format protobuf details',
-      'Hedera transaction durability and write-ahead logs',
-      'Hedera consensus time vs wall clock time',
-      'Hedera throttles and capacity limits by request type',
-      'Hedera transaction queuing algorithm',
-      'Hedera state proofs and cryptographic verification',
-      'Hedera virtual voting mathematics',
-      'Hedera round creation and consensus rounds',
-      'Hedera hashgraph efficiency O(n²) vs O(n log n)',
-      'Hedera reconnection and resync protocols',
-      'Hedera Token Service custom fees (fixed, fractional, royalty)',
-      'Hedera token supply types (finite, infinite, varying)',
-      'Hedera token freeze functionality',
-      'Hedera token wipe functionality',
-      'Hedera token pause and unpause mechanics',
-      'Hedera token kyc (Know Your Customer) configuration',
-      'Hedera token dissassociation limits and requirements',
-      'Hedera token metadata schema and standards',
-      'Hedera fractional NFTs and royalty splits',
-      'Hedera token delegation and staking',
-      'Hedera Consensus Service topic submit keys',
-      'Hedera Consensus Service sequencer and submit key validation',
-      'Hedera Consensus Service chunking for large messages',
-      'Hedera Consensus Service running hashes and verification',
-      'Hedera Consensus Service topic expiration and auto-renew',
-      'Hedera Consensus Service message retention limits',
-      'Hedera Consensus Service for verifiable random numbers',
-      'Hedera Consensus Service for decentralized oracles',
-      'Hedera precompiled contracts (htsPrecompile, prng)',
-      'Hedera Solidity gas calculation vs native transaction fees',
-      'Hedera contract deployment via HFS file system',
-      'Hedera contract traceability and opcode logs',
-      'Hedera contract auto-renew accounts',
-      'Hedera contract bytecode storage fees',
-      'Hedera system contract for account information',
-      'Hedera Redux (transaction simulation before execution)',
-      'Hedera account auto-renewal period configuration',
-      'Hedera account expiring vs deleted state',
-      'Hedera account alias using ECDSA compressed keys',
-      'Hedera account receive signature requirements',
-      'Hedera account threshold keys and multi-signature',
-      'Hedera account keylist with different public keys',
-      'Hedera account smart contract id alias',
-      'Hedera account treasury role for tokens',
-      'Hedera transaction chunking for file uploads (append)',
-      'Hedera transaction schedule (scheduleCreate, scheduleSign)',
-      'Hedera transaction batch processing limits',
-      'Hedera transaction child records and receipts',
-      'Hedera transaction queries (balance, info, records)',
-      'Hedera transaction transfer relationships',
-      'Hedera transaction signature verification',
-      'Hedera transaction memo character limits',
-      'Hedera ED25519 key pair generation and verification',
-      'Hedera ECDSA secp256k1 key support for Ethereum compatibility',
-      'Hedera zero-knowledge proof (ZKP) integration via precompiles',
-      'Hedera key derivation and hierarchical deterministic wallets',
-      'Hedera signature counting and verification limits',
-      'Hedera transaction signing with multiple keys',
-      'Hedera client certificate authentication (mTLS)',
-      'Hedera cryptographic randomness via HCS message hash',
-      'Hedera network fee sub-types (node, service, network)',
-      'Hedera congestion pricing during high traffic',
-      'Hedera fee schedule file (0.0.111) updates',
-      'Hedera gas fee calculation for smart contracts',
-      'Hedera HBAR denominated fees vs USD equivalent',
-      'Hedera treasury funding for developers (grants)',
-      'Hedera transaction cache and storage fees',
-      'Hedera token transfer fees (associate, transfer, dissociate)',
-      'Hedera Local Node for offline development',
-      'Hedera SDK entity management (create, update, delete)',
-      'Hedera REST API mirror node endpoints',
-      'Hedera JSON-RPC relay for MetaMask compatibility',
-      'Hedera Dagger (high-performance mirror node explorer)',
-      'Hedera CLI wallet (hedera-cli for terminal)',
-      'Hedera Testnet faucet mechanics and rate limits',
-      'Hedera SDK batching for performance optimization',
+      'Hedera EVM compatibility and JSON-RPC relay',
+      'Hedera mirror nodes and REST API',
+      'Hedera state proofs',
+      'Hedera carbon-negative sustainability',
+      'Hedera HIP process',
+      'Hedera scheduled transactions',
+      'Hedera token custom fees',
+      'Hedera ECDSA secp256k1 key support',
     ];
     const topic = topics[Math.floor(Math.random() * topics.length)];
     const result = await llm.invoke([{
@@ -261,14 +206,15 @@ Respond with ONLY valid JSON, no markdown:
     "Cryptographically correct! 🔐",
   ];
 
-  // --- Welcome ---
+  // Welcome
   console.log('\n🎰 ============================================ 🎰');
   console.log("   Welcome to HASH GORDON'S BLOCKCHAIN BONANZA!");
   console.log('🎰 ============================================ 🎰');
   console.log(`\n💰 Entry fee: ${config.entryFeeHbar} HBAR  |  🏆 Payout: ${config.payoutHbar} HBAR`);
+  console.log(`🏦 Prize Pool: ${config.prizePoolAccountId}`);
   console.log('\nType anything to chat | "play" to start | "score" | "history" | "exit"\n');
 
-  // --- Main REPL ---
+  // Main REPL
   while (true) {
     const r = await prompts({ type: 'text', name: 'input', message: 'You: ' });
     if (!r.input) continue;
@@ -283,35 +229,51 @@ Respond with ONLY valid JSON, no markdown:
     if (['score', 'stats'].includes(lower)) { console.log('\n' + formatStats(gameState) + '\n'); continue; }
     if (lower === 'history') { console.log('\n' + formatReceipts(gameState) + '\n'); continue; }
 
-    // --- Active round: awaiting answer ---
     if (gameState.currentRound?.awaitingAnswer) {
       if (lower === 'hint') {
         console.log(`\n💡 Hint: ${gameState.currentRound.question.hint}\n`);
         continue;
       }
 
-      const result = evaluateAnswer(gameState.currentRound.question, input);
-      if (result === 'invalid') { console.log('\n⚠️  Please answer A, B, C, or D.\n'); continue; }
+      const evalResult = evaluateAnswer(gameState.currentRound.question, input);
+      if (evalResult === 'invalid') { console.log('\n⚠️  Please answer A, B, C, or D.\n'); continue; }
 
       const round = gameState.currentRound;
-      const isCorrect = result === 'correct';
+      const isCorrect = evalResult === 'correct';
 
       if (isCorrect) {
         console.log('\n✅ CORRECT! ' + puns[Math.floor(Math.random() * puns.length)] + '\n');
         let payoutTxId = null;
+
         if (prizePoolKey) {
           try {
-            payoutTxId = await directTransfer(config.prizePoolAccountId, prizePoolKey, config.operatorAccountId, config.payoutHbar);
-            console.log(`🏆 ${config.payoutHbar} HBAR sent to your wallet! Tx: ${payoutTxId}\n`);
+            console.log('🏆 Processing payout via agent...\n');
+            // Switch operator to prize pool so the agent signs with the right key
+            switchOperator(config.prizePoolAccountId, prizePoolKey);
+            const { text, toolCall, txId } = await invokeAgent(
+              `Transfer exactly ${config.payoutHbar} HBAR from ${config.prizePoolAccountId} to ${config.operatorAccountId} as the player's prize payout.`
+            );
+            // Restore operator back to player
+            switchOperator(config.operatorAccountId, operatorKey);
+
+            if (text) console.log('Hash Gordon: ' + text + '\n');
+
+            if (!toolCall) throw new Error('Agent did not execute payout transfer.');
+            payoutTxId = txId;
+            if (payoutTxId) console.log(`🏆 ${config.payoutHbar} HBAR sent! Tx: ${payoutTxId}\n`);
           } catch (err) {
-            console.log(`⚠️  Payout transfer failed: ${err.message}\n`);
+            switchOperator(config.operatorAccountId, operatorKey); // always restore
+            console.log(`⚠️  Payout failed: ${err.message}\n`);
+            console.log('💡 Make sure the prize pool account is properly configured and has sufficient funds.\n');
           }
         } else {
           console.log('⚠️  Add PRIZE_POOL_PRIVATE_KEY to .env to enable real payouts.\n');
         }
-        const receipt = buildReceipt(round.question, payoutTxId ? 'win' : 'unresolved', config.payoutHbar, payoutTxId ?? round.entryFeeTxId);
+
+        const outcome = payoutTxId ? 'win' : 'unresolved';
+        const receipt = buildReceipt(round.question, outcome, config.payoutHbar, payoutTxId ?? round.entryFeeTxId);
         gameState.receipts.push(receipt);
-        updateStats(gameState, payoutTxId ? 'win' : 'unresolved', config.entryFeeHbar, config.payoutHbar);
+        updateStats(gameState, outcome, config.entryFeeHbar, config.payoutHbar);
         console.log(`🧾 RECEIPT | WIN🏆 | ${config.payoutHbar} HBAR | Tx: ${payoutTxId ?? round.entryFeeTxId}\n`);
       } else {
         const correctChoice = round.question.answer;
@@ -329,56 +291,47 @@ Respond with ONLY valid JSON, no markdown:
       continue;
     }
 
-    // --- Play intent ---
+    // Play intent
     if (/\b(play|start|let'?s go|new round|another|again|hit me)\b/i.test(lower) && !gameState.currentRound) {
       const confirmed = await askYesNo(`💰 Entry fee: ${config.entryFeeHbar} HBAR. Ready to play? (yes/no): `);
       if (!confirmed) { console.log('\nNo problem, come back when you\'re ready!\n'); continue; }
 
-      console.log('\n⏳ Paying entry fee on-chain...\n');
+      console.log('\n⏳ Paying entry fee via agent on-chain...\n');
       try {
         const { text, toolCall, txId } = await invokeAgent(
           `Transfer exactly ${config.entryFeeHbar} HBAR from ${config.operatorAccountId} to ${config.prizePoolAccountId} as the trivia entry fee.`
         );
         if (text) console.log('Hash Gordon: ' + text + '\n');
-
-        if (!toolCall) {
-          console.log('⚠️  Transfer did not go through. Round cancelled.\n');
-          continue;
-        }
+        if (!toolCall) { console.log('⚠️  Transfer did not go through or TX ID not captured. Round cancelled.\n'); continue; }
 
         const entryTxId = txId ?? 'unknown';
         console.log(`✅ Entry fee paid! Tx: ${entryTxId}\n`);
         console.log('🤔 Generating your question...\n');
 
         let question;
-        try {
-          question = await generateQuestion();
-        } catch (err) {
-          console.log(`⚠️  Could not generate question: ${err.message}\n`);
-          continue;
-        }
+        try { question = await generateQuestion(); }
+        catch (err) { console.log(`⚠️  Could not generate question: ${err.message}\n`); continue; }
 
         gameState.currentRound = { question, entryFeeTxId: entryTxId, awaitingAnswer: true };
         console.log(formatQuestion(question));
         console.log('Type A, B, C, or D to answer. Type "hint" for a clue.\n');
       } catch (err) {
         console.log(`⚠️  Entry fee error: ${err.message}\n`);
+        console.log('💡 Make sure you have sufficient funds in your wallet.\n');
       }
       continue;
     }
 
-    // --- Balance check ---
+    // Balance check
     if (/\bbalance\b|\bafford\b/i.test(lower)) {
       try {
         const { text } = await invokeAgent(`Check the HBAR balance for account ${config.operatorAccountId} and report it.`);
         console.log('\nHash Gordon: ' + text + '\n');
-      } catch (err) {
-        console.log(`Balance check error: ${err.message}\n`);
-      }
+      } catch (err) { console.log(`Balance check error: ${err.message}\n`); }
       continue;
     }
 
-    // --- General chat (with last round context if relevant) ---
+    // General chat
     try {
       let chatMessage = input;
       if (lastCompletedRound && /explain|why|answer|question|correct|wrong|last/i.test(lower)) {
@@ -387,9 +340,7 @@ Respond with ONLY valid JSON, no markdown:
       }
       const { text } = await invokeAgent(chatMessage);
       console.log('\nHash Gordon: ' + text + '\n');
-    } catch (err) {
-      console.log(`Error: ${err.message}\n`);
-    }
+    } catch (err) { console.log(`Error: ${err.message}\n`); }
   }
 }
 

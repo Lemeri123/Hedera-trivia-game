@@ -283,8 +283,12 @@ Respond with ONLY valid JSON, no markdown, no extra text:
     if (['score', 'stats'].includes(lower)) { console.log('\n' + formatStats(gameState) + '\n'); continue; }
     if (lower === 'history') { console.log('\n' + formatReceipts(gameState) + '\n'); continue; }
 
-    // --- Awaiting answer to active question ---
     if (gameState.currentRound?.awaitingAnswer) {
+      if (lower === 'hint') {
+        console.log(`\n💡 Hint: ${gameState.currentRound.question.hint}\n`);
+        continue;
+      }
+
       const result = evaluateAnswer(gameState.currentRound.question, input);
       if (result === 'invalid') { console.log('\n⚠️  Please answer A, B, C, or D.\n'); continue; }
 
@@ -363,12 +367,6 @@ Respond with ONLY valid JSON, no markdown, no extra text:
         console.error('Entry fee error:', err.message);
         console.log('⚠️  Could not pay entry fee. Round cancelled.\n');
       }
-      continue;
-    }
-
-    // --- Hint during active question ---
-    if (lower === 'hint' && gameState.currentRound?.awaitingAnswer) {
-      console.log(`\n💡 Hint: ${gameState.currentRound.question.hint}\n`);
       continue;
     }
 

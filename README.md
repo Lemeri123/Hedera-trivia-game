@@ -189,23 +189,9 @@ The agent uses the Hedera Agent Kit's `TRANSFER_HBAR_TOOL` for all on-chain acti
 
 ---
 
-## Switching to OpenAI
+## Switching AI
 
-The game currently uses Groq (free). To switch to OpenAI GPT-4o mini:
-
-1. Install the package: `npm install @langchain/openai`
-2. In `agent.js`, replace:
-   ```js
-   import { ChatGroq } from '@langchain/groq';
-   const llm = new ChatGroq({ model: 'llama-3.1-8b-instant', apiKey: config.groqApiKey });
-   ```
-   With:
-   ```js
-   import { ChatOpenAI } from '@langchain/openai';
-   const llm = new ChatOpenAI({ model: 'gpt-4o-mini', apiKey: config.openAiApiKey });
-   ```
-3. In `config.js`, add `openAiApiKey: process.env.OPENAI_API_KEY` and update the required vars list
-4. Add `OPENAI_API_KEY=sk-...` to your `.env`
+The game currently uses Groq (free). But you can as well switch to your preferable AI option
 
 ---
 

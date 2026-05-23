@@ -1,6 +1,6 @@
 # Hash Gordon's Blockchain Bonanza 🎰
 
-A fun, interactive Hedera trivia game agent built on the [Hedera Agent Kit](https://portal.hedera.com/agent-lab). Test your Hedera knowledge, put real HBAR on the line, and win double your money if you get it right.
+A fun, interactive Hedera trivia game agent built on the [Hedera Agent Kit](https://github.com/hashgraph/hedera-agent-kit-js). Test your Hedera knowledge, put real HBAR on the line, and win double your money if you get it right.
 
 ## What It Does
 
